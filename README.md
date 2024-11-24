@@ -1,137 +1,310 @@
-# Bokdatainsamlare med Libris API
+import requests
+import pandas as pd
+import xml.etree.ElementTree as ET
+import re
+from time import sleep
+import logging
+from datetime import datetime
+import os
 
-Det här skriptet används för att samla in information om böcker från Libris API baserat på en lista med boktitlar och utgivningsår. Informationen kompletteras med data som antal sidor, författare, förlag, ISBN och nyckelord (t.ex. genre).
+# Konfigurera loggning
+log_directory = "logs"
+if not os.path.exists(log_directory):
+    os.makedirs(log_directory)
 
-## Funktionalitet
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(f'{log_directory}/book_search_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'),
+        logging.StreamHandler()
+    ]
+)
 
-1. Läser in en CSV-fil med boktitlar och utgivningsår.
-2. Söker efter varje bok i Libris API.
-3. Hämtar och strukturerar information från API:et, inklusive:
-   - Titel
-   - Författare
-   - Antal sidor
-   - Utgivningsår (från API)
-   - Förlag
-   - ISBN
-   - Nyckelord (t.ex. genre)
-4. Ignorerar poster som innehåller specifika oönskade nyckelord (t.ex. "E-böcker", "ljudböcker").
-5. Gör flera försök om resultaten innehåller oönskade nyckelord.
-6. Skapar en ny CSV-fil med samlad information och markeringar för avvikande utgivningsår.
+class ValidationError(Exception):
+    """Custom exception för valideringsfel"""
+    pass
 
----
+def clean_text(text):
+    """
+    Rensa och standardisera text
+    """
+    if pd.isna(text) or not text:
+        return None
+    # Ta bort specialtecken och överflödiga mellanslag
+    cleaned = re.sub(r'[^\w\såäöÅÄÖ]', ' ', str(text))
+    cleaned = ' '.join(cleaned.split())
+    return cleaned.strip()
 
-## Installationsanvisningar
+def validate_year(year_str):
+    """
+    Validera att året är rimligt
+    """
+    try:
+        if year_str and year_str.isdigit():
+            year = int(year_str)
+            current_year = datetime.now().year
+            if 1800 <= year <= current_year:
+                return True
+            else:
+                logging.warning(f"Ogiltigt år: {year}")
+                return False
+    except (ValueError, TypeError):
+        return False
+    return False
 
-1. **Krav**:
-   - Python 3.7 eller senare
-   - Bibliotek: `requests`, `pandas`, `xml.etree.ElementTree`
+def extract_pages(page_info):
+    """
+    Extrahera sidantal från textstring
+    """
+    if page_info and isinstance(page_info, str):
+        # Matcha olika sidformater (t.ex. "271 s", "271s", "271 sidor")
+        match = re.search(r'(\d+)\s*s(?:idor)?', page_info)
+        if match:
+            return f"{match.group(1)} s"
+    return "Okänt"
 
-   Installera nödvändiga bibliotek:
-   ```bash
-   pip install requests pandas
-   ```
+def extract_year(date_issued):
+    """
+    Extrahera år från datumstring
+    """
+    if date_issued and isinstance(date_issued, str):
+        match = re.search(r'\d{4}', date_issued)
+        if match:
+            year = match.group()
+            if validate_year(year):
+                return year
+    return "Okänt"
 
-2. **Strukturera din data**:
-   - Skapa en CSV-fil (t.ex. `bocker.csv`) med följande kolumner:
-     ```csv
-     Titel;Utgivningsår
-     Akrobaten;2022
-     Aldrig mer;2018
-     All denna vrede;2021
-     ```
+def clean_year(year):
+    """
+    Standardisera årsformat
+    """
+    try:
+        if pd.notna(year) and str(year).replace('.', '').isdigit():
+            year_int = int(float(year))
+            if validate_year(str(year_int)):
+                return str(year_int)
+    except (ValueError, TypeError):
+        pass
+    return "Okänt"
 
-3. **Kör skriptet**:
-   - Kör Python-skriptet:
-     ```bash
-     python update_books.py
-     ```
+def extract_keywords(record, namespace):
+    """
+    Extrahera och rensa nyckelord från XML
+    """
+    genres = record.findall('.//mods:genre', namespaces=namespace)
+    keywords = [genre.text.strip() for genre in genres if genre.text]
+    return ", ".join(keywords) if keywords else "Okänt"
 
-4. **Output**:
-   - En ny CSV-fil (`uppdaterade_bocker.csv`) genereras med följande kolumner:
-     ```csv
-     Titel;Utgivningsår (Lista);Utgivningsår (API);Antal sidor;Författare;Förlag;ISBN;Nyckelord;Avvikande år
-     ```
+def should_skip_record(keywords, unwanted_keywords):
+    """
+    Kontrollera om en post ska filtreras bort baserat på nyckelord
+    """
+    if not keywords:
+        return False
+        
+    keywords_lower = keywords.lower()
+    
+    # Kontrollera exakta matchningar
+    for keyword in unwanted_keywords:
+        if keyword in keywords_lower:
+            logging.info(f"Filtrerar bort post med nyckelord: {keyword}")
+            return True
+            
+    return False
 
----
+def clean_isbn(isbn_text):
+    """
+    Rensa och validera ISBN
+    """
+    if not isbn_text or isbn_text == "Okänt":
+        return "Okänt"
+        
+    # Ta endast första ISBN om det finns flera
+    isbn = isbn_text.split()[0]
+    
+    # Ta bort alla icke-alfanumeriska tecken
+    isbn = re.sub(r'[^0-9X]', '', isbn.upper())
+    
+    # Validera längd (ISBN-10 eller ISBN-13)
+    if len(isbn) not in [10, 13]:
+        return "Okänt"
+        
+    return isbn
 
-## Filbeskrivning
+def search_book(title, attempt=1, max_attempts=5):
+    """
+    Sök efter bok med förbättrad felhantering och filtrering
+    """
+    if not title or pd.isna(title):
+        logging.warning("Tomt titelfält, hoppar över")
+        return None
+        
+    base_url = "https://libris.kb.se/xsearch"
+    cleaned_title = clean_text(title)
+    
+    if not cleaned_title:
+        logging.warning(f"Ogiltig titel efter rensning: {title}")
+        return None
+        
+    query = f"tit:({cleaned_title})"
+    
+    params = {
+        'query': query,
+        'format': 'mods',
+        'n': 10  # Ökat antal resultat för bättre filtrering
+    }
+    
+    # Lista över oönskade nyckelord (skiftlägesokänslig)
+    unwanted_keywords = [
+        "e-böcker", "e-bok", "text och ljud", "video dvd", "organisationspress",
+        "videorecording", "ljudböcker", "ljudbok", "tv-program", "comic books",
+        "graphic novels", "punktskriftsböcker", "talböcker", "photobooks",
+        "periodical", "tidskrift", "tidning", "film", "motion picture",
+        "daisy", "utställningskataloger", "kartor", "radio", "television",
+        "storstilsbok", "lättläst", "läromedel", "seriealbum", "faktabok"
+    ]
+    unwanted_keywords = [keyword.lower() for keyword in unwanted_keywords]
 
-### `update_books.py`
-Det huvudsakliga skriptet som:
-1. Läser in boklistan.
-2. Söker efter information i Libris API.
-3. Ignorerar poster baserat på oönskade nyckelord.
-4. Skriver ut resultaten till en CSV-fil.
+    try:
+        response = requests.get(base_url, params=params, timeout=10)
+        response.raise_for_status()
+        
+        if 'records="0"' in response.content.decode():
+            logging.info(f"Inga resultat för: {title}")
+            return None
+            
+        root = ET.fromstring(response.content)
+        namespace = {'mods': 'http://www.loc.gov/mods/v3'}
+        
+        # Gå igenom alla poster och hitta första giltiga
+        for record in root.findall('.//mods:mods', namespaces=namespace):
+            keywords = extract_keywords(record, namespace)
+            
+            if should_skip_record(keywords, unwanted_keywords):
+                continue
+                
+            title_elem = record.find('.//mods:title', namespaces=namespace)
+            creator = record.find('.//mods:name/mods:namePart', namespaces=namespace)
+            pages = record.find('.//mods:extent', namespaces=namespace)
+            date_issued = record.find('.//mods:dateIssued', namespaces=namespace)
+            publisher = record.find('.//mods:publisher', namespaces=namespace)
+            isbn = record.find('.//mods:identifier[@type="isbn"]', namespaces=namespace)
+            
+            result = {
+                'Titel': clean_text(title_elem.text) if title_elem is not None else "Okänd titel",
+                'Författare': clean_text(creator.text) if creator is not None else "Ingen författare",
+                'Antal sidor': extract_pages(pages.text if pages is not None else "Okänt"),
+                'Utgivningsår (API)': extract_year(date_issued.text if date_issued is not None else "Okänt"),
+                'Förlag': clean_text(publisher.text) if publisher is not None else "Okänt",
+                'ISBN': clean_isbn(isbn.text if isbn is not None else "Okänt"),
+                'Nyckelord': keywords
+            }
+            
+            # Extra validering av resultatet
+            if result['Utgivningsår (API)'] == "Okänt" and attempt < max_attempts:
+                logging.warning(f"Ogiltig årtal för {title}, försöker igen")
+                sleep(1)
+                continue
+                
+            return result
+            
+        # Om vi inte hittat någon giltig post och har försök kvar
+        if attempt < max_attempts:
+            logging.info(f"Inga giltiga resultat för '{title}', försöker igen... ({attempt}/{max_attempts})")
+            sleep(1)
+            return search_book(title, attempt=attempt + 1, max_attempts=max_attempts)
+        else:
+            logging.warning(f"Max antal försök uppnått för '{title}'")
+            return None
+            
+    except requests.RequestException as e:
+        logging.error(f"API-fel för '{title}': {e}")
+        if attempt < max_attempts:
+            sleep(2 * attempt)  # Exponentiell backoff
+            return search_book(title, attempt=attempt + 1, max_attempts=max_attempts)
+        return None
 
----
+def main():
+    """
+    Huvudfunktion för programmet
+    """
+    input_file = 'bocker.csv'
+    output_file = 'uppdaterade_bocker.csv'
+    
+    try:
+        logging.info(f"Läser in {input_file}")
+        books = pd.read_csv(input_file, sep=';', encoding='utf-8')
+        
+        # Ta bort dubbletter i indatan
+        initial_count = len(books)
+        books = books.drop_duplicates(subset=['Titel'], keep='first')
+        if len(books) < initial_count:
+            logging.info(f"Tog bort {initial_count - len(books)} dubbletter från indatan")
+        
+        updated_books = []
+        total_books = len(books)
+        
+        for index, row in books.iterrows():
+            title = row['Titel']
+            given_year = clean_year(row['Utgivningsår'])
+            
+            logging.info(f"Söker ({index + 1}/{total_books}): {title}")
+            book_info = search_book(title)
+            
+            if book_info:
+                updated_books.append({
+                    'Titel': title,
+                    'Utgivningsår (Lista)': given_year,
+                    'Utgivningsår (API)': book_info['Utgivningsår (API)'],
+                    'Antal sidor': book_info['Antal sidor'],
+                    'Författare': book_info['Författare'],
+                    'Förlag': book_info['Förlag'],
+                    'ISBN': book_info['ISBN'],
+                    'Nyckelord': book_info['Nyckelord'],
+                    'Avvikande år': 'Ja' if book_info['Utgivningsår (API)'] != "Okänt" 
+                                        and given_year != "Okänt" 
+                                        and given_year != book_info['Utgivningsår (API)'] else 'Nej'
+                })
+            else:
+                updated_books.append({
+                    'Titel': title,
+                    'Utgivningsår (Lista)': given_year,
+                    'Utgivningsår (API)': 'Ej hittad',
+                    'Antal sidor': 'Ej hittad',
+                    'Författare': 'Ej hittad',
+                    'Förlag': 'Ej hittad',
+                    'ISBN': 'Ej hittad',
+                    'Nyckelord': 'Ej hittad',
+                    'Avvikande år': 'Nej'
+                })
+            
+            sleep(0.5)
+        
+        # Skapa DataFrame och ta bort eventuella dubbletter i resultatet
+        output_df = pd.DataFrame(updated_books)
+        output_df = output_df.drop_duplicates(subset=['Titel', 'ISBN'], keep='last')
+        
+        # Spara resultatet
+        output_df.to_csv(output_file, sep=';', index=False, encoding='utf-8')
+        logging.info(f"Resultaten har sparats i {output_file}")
+        
+        # Skriv ut statistik
+        total_processed = len(output_df)
+        not_found = len(output_df[output_df['Utgivningsår (API)'] == 'Ej hittad'])
+        year_mismatch = len(output_df[output_df['Avvikande år'] == 'Ja'])
+        
+        logging.info(f"""
+        Statistik:
+        - Totalt antal böcker processerade: {total_processed}
+        - Antal böcker ej hittade: {not_found}
+        - Antal böcker med avvikande år: {year_mismatch}
+        """)
+        
+    except Exception as e:
+        logging.error(f"Ett oväntat fel uppstod: {e}", exc_info=True)
+        raise
 
-## Hur fungerar processen?
-
-1. **Inläsning av boklista**:
-   - Skriptet läser in CSV-filen med titlar och utgivningsår.
-   - Decimaler i "Utgivningsår" tas bort för renare representation (t.ex. `2022.0` → `2022`).
-
-2. **API-förfrågningar**:
-   - För varje titel görs en sökning i Libris API.
-   - Data från API:et struktureras och analyseras.
-
-3. **Ignorering av oönskade resultat**:
-   - Resultat som innehåller nyckelord som "E-böcker", "ljudböcker", etc., ignoreras.
-   - Skriptet försöker flera gånger (upp till tre) att hitta ett resultat utan oönskade nyckelord.
-
-4. **Generering av ny CSV-fil**:
-   - Data skrivs till en ny CSV-fil med kompletterad information.
-
----
-
-## Anpassning och utveckling
-
-### Lägg till fler nyckelord att ignorera
-För att lägga till fler oönskade nyckelord:
-1. Öppna skriptet.
-2. Hitta listan över nyckelord i funktionen `search_book`:
-   ```python
-   unwanted_keywords = ["E-böcker", "text och ljud", "organisationspress", 
-                        "videorecording", "ljudböcker", "TV-program", 
-                        "comic books", "graphic novels"]
-   ```
-3. Lägg till fler nyckelord i listan, separerade med kommatecken.
-
-### Ändra max antal försök
-Om du vill öka antalet försök att ignorera oönskade resultat:
-1. Ändra parametern `max_attempts` i funktionen `search_book`:
-   ```python
-   search_book(title, ignore_unwanted_keywords=True, attempt=attempt + 1, max_attempts=5)
-   ```
-
-### Utöka funktionalitet
-- **Fler datafält**:
-  Lägg till fler fält från API:et genom att anpassa hur data hämtas i `search_book`.
-- **Integration med andra API:er**:
-  Lägg till stöd för andra bokdatabaser (t.ex. Goodreads) för att komplettera datan.
-
----
-
-## Exempel på körning
-
-### Input
-```csv
-Titel;Utgivningsår
-Akrobaten;2022
-Aldrig mer;2018
-All denna vrede;2021
-```
-
-### Output
-```csv
-Titel;Utgivningsår (Lista);Utgivningsår (API);Antal sidor;Författare;Förlag;ISBN;Nyckelord;Avvikande år
-Akrobaten;2022;2022;271 s;Sundkvist, Anders;Modernista;9789180237871;Deckare, Roman;Nej
-Aldrig mer;2018;2018;430 s;Larsson, Sara;Norstedts;9789113082738;Roman;Nej
-All denna vrede;2021;2021;407 s;Hunter, Cara;Louise Bäckelin förlag;9789177992530;novel, Deckare, Romaner;Nej
-```
-
----
-
-## Kontakt
-
-Om du har frågor eller förslag, vänligen kontakta anders.barane@gmail.com.
+if __name__ == "__main__":
+    main()
