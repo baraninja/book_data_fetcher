@@ -58,9 +58,9 @@ def search_book(title, ignore_unwanted_keywords=False, attempt=1, max_attempts=3
             keywords = extract_keywords(record, namespace)
 
             # Lista med oönskade nyckelord
-            unwanted_keywords = ["E-böcker", "text och ljud", "organisationspress", 
+            unwanted_keywords = ["E-böcker", "text och ljud", "video dvd", "organisationspress", 
                                  "videorecording", "ljudböcker", "TV-program", 
-                                 "comic books", "graphic novels"]
+                                 "comic books", "graphic novels", "punktskriftsböcker", "talböcker", "photobooks"]
             
             # Kontrollera oönskade nyckelord
             if ignore_unwanted_keywords and any(keyword in keywords for keyword in unwanted_keywords):
