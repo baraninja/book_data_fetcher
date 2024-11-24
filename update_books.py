@@ -133,9 +133,59 @@ def clean_isbn(isbn_text):
         
     return isbn
 
-def search_book(title, attempt=1, max_attempts=5):
+def calculate_match_score(record, title, year, namespace):
     """
-    Sök efter bok med förbättrad felhantering och filtrering
+    Beräkna en matchningspoäng för hur väl en post matchar sökkriterierna
+    """
+    score = 0
+    max_score = 100
+    
+    # Titel matchning
+    record_title = record.find('.//mods:title', namespaces=namespace)
+    if record_title is not None and record_title.text:
+        title_similarity = similar(clean_text(title).lower(), 
+                                 clean_text(record_title.text).lower())
+        score += title_similarity * 50  # Titel är viktigast, max 50 poäng
+    
+    # Årtal matchning
+    date_issued = record.find('.//mods:dateIssued', namespaces=namespace)
+    if date_issued is not None and date_issued.text:
+        record_year = extract_year(date_issued.text)
+        if record_year != "Okänt" and year != "Okänt":
+            year_diff = abs(int(record_year) - int(year))
+            if year_diff == 0:
+                score += 30  # Exakt årsmatchning ger 30 poäng
+            elif year_diff <= 2:
+                score += 20  # Närliggande år ger 20 poäng
+            elif year_diff <= 5:
+                score += 10  # Inom 5 år ger 10 poäng
+    
+    # Typ/genre matchning
+    genres = record.findall('.//mods:genre', namespaces=namespace)
+    if any(g.text and 'novel' in g.text.lower() for g in genres):
+        score += 20  # Bonus för romaner/skönlitteratur
+        
+    return score
+
+def similar(a, b):
+    """
+    Beräkna likhet mellan två strängar (0-1)
+    """
+    from difflib import SequenceMatcher
+    return SequenceMatcher(None, a, b).ratio()
+
+def is_valid_book_record(record, namespace):
+    """
+    Kontrollera om posten är en giltig bok baserat på typeOfResource
+    """
+    type_of_resource = record.find('.//mods:typeOfResource', namespaces=namespace)
+    if type_of_resource is not None and type_of_resource.text:
+        return type_of_resource.text.lower().strip() == 'text'
+    return False
+
+def search_book(title, year="Okänt", attempt=1, max_attempts=5):
+    """
+    Sök efter bok med förbättrad felhantering, filtrering och matchning
     """
     if not title or pd.isna(title):
         logging.warning("Tomt titelfält, hoppar över")
@@ -148,7 +198,13 @@ def search_book(title, attempt=1, max_attempts=5):
         logging.warning(f"Ogiltig titel efter rensning: {title}")
         return None
         
-    query = f"tit:({cleaned_title})"
+    # Skapa en mer specifik sökning med både titel och år när året finns
+    if year and year != "Okänt":
+        query = f'tit:({cleaned_title}) AND year:{year}'
+        logging.info(f"Söker med år: {query}")
+    else:
+        query = f'tit:({cleaned_title})'
+        logging.info(f"Söker utan år: {query}")
     
     params = {
         'query': query,
@@ -178,12 +234,24 @@ def search_book(title, attempt=1, max_attempts=5):
         root = ET.fromstring(response.content)
         namespace = {'mods': 'http://www.loc.gov/mods/v3'}
         
-        # Gå igenom alla poster och hitta första giltiga
+        # Samla alla giltiga poster och deras matchningspoäng
+        valid_matches = []
         for record in root.findall('.//mods:mods', namespaces=namespace):
             keywords = extract_keywords(record, namespace)
             
             if should_skip_record(keywords, unwanted_keywords):
                 continue
+                
+            match_score = calculate_match_score(record, title, year, namespace)
+            if match_score > 60:  # Kräv minst 60% matchning
+                valid_matches.append((match_score, record))
+        
+        # Sortera på matchningspoäng och ta bästa träffen
+        if valid_matches:
+            valid_matches.sort(key=lambda x: x[0], reverse=True)
+            best_score, best_record = valid_matches[0]
+            logging.info(f"Bästa matchning för '{title}' fick poäng {best_score}/100")
+            record = best_record
                 
             title_elem = record.find('.//mods:title', namespaces=namespace)
             creator = record.find('.//mods:name/mods:namePart', namespaces=namespace)
@@ -206,7 +274,7 @@ def search_book(title, attempt=1, max_attempts=5):
             if result['Utgivningsår (API)'] == "Okänt" and attempt < max_attempts:
                 logging.warning(f"Ogiltig årtal för {title}, försöker igen")
                 sleep(1)
-                continue
+                return search_book(title, year, attempt + 1, max_attempts)
                 
             return result
             
@@ -251,7 +319,7 @@ def main():
             given_year = clean_year(row['Utgivningsår'])
             
             logging.info(f"Söker ({index + 1}/{total_books}): {title}")
-            book_info = search_book(title)
+            book_info = search_book(title, given_year)
             
             if book_info:
                 updated_books.append({
@@ -262,7 +330,6 @@ def main():
                     'Författare': book_info['Författare'],
                     'Förlag': book_info['Förlag'],
                     'ISBN': book_info['ISBN'],
-                    'Nyckelord': book_info['Nyckelord'],
                     'Avvikande år': 'Ja' if book_info['Utgivningsår (API)'] != "Okänt" 
                                         and given_year != "Okänt" 
                                         and given_year != book_info['Utgivningsår (API)'] else 'Nej'
@@ -276,7 +343,6 @@ def main():
                     'Författare': 'Ej hittad',
                     'Förlag': 'Ej hittad',
                     'ISBN': 'Ej hittad',
-                    'Nyckelord': 'Ej hittad',
                     'Avvikande år': 'Nej'
                 })
             
