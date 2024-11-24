@@ -1,29 +1,29 @@
 # Bokdatainsamlare med Libris API
 
-Ett robust Python-skript för att samla in och validera bokinformation från Libris API. Skriptet hanterar duplicerade poster, filtrerar oönskade medietyper och inkluderar omfattande felhantering och loggning.
+Ett robust Python-skript för att samla in och validera bokinformation från Libris API. Skriptet är särskilt utformat för att hämta information om tryckta böcker genom att filtrera bort andra medietyper och format.
 
 ## Funktionalitet
 
 1. **Datainsamling**:
    - Läser in CSV-fil med boktitlar och utgivningsår
    - Söker i Libris API med smart återförsökslogik
-   - Validerar och strukturerar resultaten
+   - Säkerställer att endast tryckta böcker (typeOfResource="text") inkluderas
 
 2. **Databehandling**:
    - Automatisk dubbletthantering
    - Smart textrensnig och standardisering
    - Validering av årtal och ISBN
-   - Omfattande filtrering av oönskade medietyper
+   - Omfattande filtrering av oönskade medietyper (e-böcker, ljudböcker, etc.)
 
-3. **Resultat**:
-   - Genererar strukturerad CSV med komplett bokinformation
-   - Skapar detaljerade loggfiler för felsökning
-   - Ger statistik över körningen
+3. **Validering och Filtrering**:
+   - Verifierar att posten är en tryckt bok
+   - Filtrerar bort e-böcker, ljudböcker, film etc.
+   - Kontrollerar årtalsöverensstämmelse
 
-4. **Felhantering**:
+4. **Felhantering och Loggning**:
    - Robust API-felhantering med exponentiell backoff
-   - Validering av all indata och utdata
-   - Omfattande loggning för felsökning
+   - Detaljerad loggning för felsökning
+   - Statistik över körningen
 
 ## Installation
 
@@ -66,7 +66,7 @@ Skriptet genererar:
 
 ### CSV-struktur
 ```csv
-Titel;Utgivningsår (Lista);Utgivningsår (API);Antal sidor;Författare;Förlag;ISBN;Nyckelord;Avvikande år
+Titel;Utgivningsår (Lista);Utgivningsår (API);Antal sidor;Författare;Förlag;ISBN;Avvikande år
 ```
 
 ### Fältbeskrivningar
@@ -77,39 +77,25 @@ Titel;Utgivningsår (Lista);Utgivningsår (API);Antal sidor;Författare;Förlag;
 - **Författare**: Författarens namn
 - **Förlag**: Utgivande förlag
 - **ISBN**: Rensat och validerat ISBN
-- **Nyckelord**: Genre och kategorier
 - **Avvikande år**: "Ja"/"Nej" beroende på om årtalen matchar
 
-## Anpassning
+## Filtreringskriterier
 
-### Lägga till filtreringsregler
-Redigera `unwanted_keywords`-listan i skriptet:
-```python
-unwanted_keywords = [
-    "e-böcker", "e-bok",
-    "ljudböcker", "ljudbok",
-    # Lägg till fler nyckelord här
-]
-```
+Skriptet använder flera metoder för att identifiera och filtrera bort icke-bokposter:
 
-### Justera API-parametrar
-Ändra sökparametrar i `search_book`-funktionen:
-```python
-params = {
-    'query': query,
-    'format': 'mods',
-    'n': 10  # Antal resultat att hämta
-}
-```
+1. **TypeOfResource-kontroll**:
+   - Accepterar endast poster med typeOfResource="text"
 
-### Konfigurera loggning
-Anpassa loggnivå och format i huvudskriptet:
-```python
-logging.basicConfig(
-    level=logging.INFO,  # Ändra till DEBUG för mer detaljerad loggning
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-```
+2. **Format- och medietypsfiltrering**:
+   Filtrerar bort poster som innehåller nyckelord som:
+   - E-böcker och digitala format
+   - Ljudböcker och ljudinspelningar
+   - Film och video
+   - Tidskrifter och periodika
+   - Barn- och ungdomslitteratur
+   - Läromedel och faktaböcker
+   - Musikrelaterat material
+   - Diverse andra format (kartor, utställningskataloger, etc.)
 
 ## Felhantering
 
@@ -129,8 +115,8 @@ Vid fel:
 ### Loggfiler
 - Skapas i `logs`-mappen
 - Namnges med tidsstämpel
-- Innehåller detaljerad information om:
-  - API-anrop
+- Innehåller information om:
+  - API-anrop och sökningar
   - Filterresultat
   - Valideringsresultat
   - Fel och varningar
@@ -142,20 +128,12 @@ Efter körning visas:
 - Antal böcker med avvikande år
 - Antal hanterade dubbletter
 
-## Prestanda och begränsningar
+## Prestanda
 
 - Väntar 0.5 sekunder mellan API-anrop
 - Ökar väntetid exponentiellt vid fel
 - Begränsar antal återförsök per bok
-- Hanterar upp till 10 resultat per sökning
-
-## Utveckling och bidrag
-
-Förslag på förbättringar välkomnas! Några idéer:
-- Parallell processering av API-anrop
-- Integration med andra bokdatabaser
-- GUI för enklare användning
-- Export till andra format
+- Möjlighet att använda år i sökningen för bättre träffar
 
 ## Kontakt
 
