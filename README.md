@@ -92,7 +92,6 @@ Skriptet använder flera metoder för att identifiera och filtrera bort icke-bok
    - Ljudböcker och ljudinspelningar
    - Film och video
    - Tidskrifter och periodika
-   - Barn- och ungdomslitteratur
    - Läromedel och faktaböcker
    - Musikrelaterat material
    - Diverse andra format (kartor, utställningskataloger, etc.)
