@@ -192,6 +192,7 @@ def search_book(title, year="Okänt", attempt=1, max_attempts=5):
         return None
         
     base_url = "https://libris.kb.se/xsearch"
+    namespace = {'mods': 'http://www.loc.gov/mods/v3'}  # Flyttat hit från längre ner i funktionen
     cleaned_title = clean_text(title)
     
     if not cleaned_title:
@@ -209,10 +210,9 @@ def search_book(title, year="Okänt", attempt=1, max_attempts=5):
     params = {
         'query': query,
         'format': 'mods',
-        'n': 10  # Ökat antal resultat för bättre filtrering
+        'n': 10
     }
     
-    # Lista över oönskade nyckelord (skiftlägesokänslig)
     unwanted_keywords = [
         "e-böcker", "e-bok", "text och ljud", "video dvd", "organisationspress",
         "videorecording", "ljudböcker", "ljudbok", "tv-program", "comic books",
@@ -227,12 +227,20 @@ def search_book(title, year="Okänt", attempt=1, max_attempts=5):
         response = requests.get(base_url, params=params, timeout=10)
         response.raise_for_status()
         
-        if 'records="0"' in response.content.decode():
-            logging.info(f"Inga resultat för: {title}")
+        content = response.content.decode().strip()
+        if not content:
+            logging.warning(f"Tomt svar från API för: {title}")
             return None
             
-        root = ET.fromstring(response.content)
-        namespace = {'mods': 'http://www.loc.gov/mods/v3'}
+        try:
+            root = ET.fromstring(content)
+        except ET.ParseError as e:
+            logging.error(f"Kunde inte parsa XML-svaret för '{title}': {e}")
+            logging.debug(f"API-svar: {content[:200]}...")
+            if attempt < max_attempts:
+                sleep(2 * attempt)
+                return search_book(title, year, attempt + 1, max_attempts)
+            return None
         
         # Samla alla giltiga poster och deras matchningspoäng
         valid_matches = []
@@ -290,8 +298,8 @@ def search_book(title, year="Okänt", attempt=1, max_attempts=5):
     except requests.RequestException as e:
         logging.error(f"API-fel för '{title}': {e}")
         if attempt < max_attempts:
-            sleep(2 * attempt)  # Exponentiell backoff
-            return search_book(title, attempt=attempt + 1, max_attempts=max_attempts)
+            sleep(2 * attempt)
+            return search_book(title, year, attempt + 1, max_attempts)
         return None
 
 def main():
