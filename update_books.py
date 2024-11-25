@@ -55,13 +55,13 @@ def validate_year(year_str):
 
 def extract_pages(page_info):
     """
-    Extrahera sidantal från textstring
+    Extrahera endast sidantal (som siffra) från textstring
     """
     if page_info and isinstance(page_info, str):
-        # Matcha olika sidformater (t.ex. "271 s", "271s", "271 sidor")
+        # Matcha endast siffrorna
         match = re.search(r'(\d+)\s*s(?:idor)?', page_info)
         if match:
-            return f"{match.group(1)} s"
+            return match.group(1)  # Returnera endast siffrorna
     return "Okänt"
 
 def extract_year(date_issued):
@@ -307,7 +307,7 @@ def main():
         
         # Ta bort dubbletter i indatan
         initial_count = len(books)
-        books = books.drop_duplicates(subset=['Titel'], keep='first')
+        books = books.drop_duplicates(subset=['Titel', 'Utgivningsår'], keep='first')
         if len(books) < initial_count:
             logging.info(f"Tog bort {initial_count - len(books)} dubbletter från indatan")
         
@@ -350,7 +350,7 @@ def main():
         
         # Skapa DataFrame och ta bort eventuella dubbletter i resultatet
         output_df = pd.DataFrame(updated_books)
-        output_df = output_df.drop_duplicates(subset=['Titel', 'ISBN'], keep='last')
+        output_df = output_df.drop_duplicates(subset=['Titel', 'Utgivningsår (API)'], keep='last')
         
         # Spara resultatet
         output_df.to_csv(output_file, sep=';', index=False, encoding='utf-8')
@@ -361,11 +361,20 @@ def main():
         not_found = len(output_df[output_df['Utgivningsår (API)'] == 'Ej hittad'])
         year_mismatch = len(output_df[output_df['Avvikande år'] == 'Ja'])
         
+        # Skapa separata filer för ej hittade böcker och böcker med avvikande år
+        not_found_df = output_df[output_df['Utgivningsår (API)'] == 'Ej hittad']
+        year_mismatch_df = output_df[output_df['Avvikande år'] == 'Ja']
+
+        # Spara till separata filer
+        not_found_df.to_csv('ej_hittade_bocker.csv', sep=';', index=False, encoding='utf-8')
+        year_mismatch_df.to_csv('avvikande_ar_bocker.csv', sep=';', index=False, encoding='utf-8')
+
+        # Uppdatera loggningen för att inkludera information om de nya filerna
         logging.info(f"""
         Statistik:
         - Totalt antal böcker processerade: {total_processed}
-        - Antal böcker ej hittade: {not_found}
-        - Antal böcker med avvikande år: {year_mismatch}
+        - Antal böcker ej hittade: {not_found} (sparade i 'ej_hittade_bocker.csv')
+        - Antal böcker med avvikande år: {year_mismatch} (sparade i 'avvikande_ar_bocker.csv')
         """)
         
     except Exception as e:
