@@ -88,7 +88,6 @@ def clean_year(year):
     except (ValueError, TypeError):
         pass
     return "Okänt"
-
 def extract_keywords(record, namespace):
     """
     Extrahera och rensa nyckelord från XML
@@ -182,7 +181,6 @@ def is_valid_book_record(record, namespace):
     if type_of_resource is not None and type_of_resource.text:
         return type_of_resource.text.lower().strip() == 'text'
     return False
-
 def search_book(title, year="Okänt", attempt=1, max_attempts=5):
     """
     Sök efter bok med förbättrad felhantering, filtrering och matchning
@@ -192,7 +190,6 @@ def search_book(title, year="Okänt", attempt=1, max_attempts=5):
         return None
         
     base_url = "https://libris.kb.se/xsearch"
-    namespace = {'mods': 'http://www.loc.gov/mods/v3'}  # Flyttat hit från längre ner i funktionen
     cleaned_title = clean_text(title)
     
     if not cleaned_title:
@@ -210,9 +207,10 @@ def search_book(title, year="Okänt", attempt=1, max_attempts=5):
     params = {
         'query': query,
         'format': 'mods',
-        'n': 10
+        'n': 10  # Ökat antal resultat för bättre filtrering
     }
     
+    # Lista över oönskade nyckelord (skiftlägesokänslig)
     unwanted_keywords = [
         "e-böcker", "e-bok", "text och ljud", "video dvd", "organisationspress",
         "videorecording", "ljudböcker", "ljudbok", "tv-program", "comic books",
@@ -227,20 +225,12 @@ def search_book(title, year="Okänt", attempt=1, max_attempts=5):
         response = requests.get(base_url, params=params, timeout=10)
         response.raise_for_status()
         
-        content = response.content.decode().strip()
-        if not content:
-            logging.warning(f"Tomt svar från API för: {title}")
+        if 'records="0"' in response.content.decode():
+            logging.info(f"Inga resultat för: {title}")
             return None
             
-        try:
-            root = ET.fromstring(content)
-        except ET.ParseError as e:
-            logging.error(f"Kunde inte parsa XML-svaret för '{title}': {e}")
-            logging.debug(f"API-svar: {content[:200]}...")
-            if attempt < max_attempts:
-                sleep(2 * attempt)
-                return search_book(title, year, attempt + 1, max_attempts)
-            return None
+        root = ET.fromstring(response.content)
+        namespace = {'mods': 'http://www.loc.gov/mods/v3'}
         
         # Samla alla giltiga poster och deras matchningspoäng
         valid_matches = []
@@ -298,8 +288,8 @@ def search_book(title, year="Okänt", attempt=1, max_attempts=5):
     except requests.RequestException as e:
         logging.error(f"API-fel för '{title}': {e}")
         if attempt < max_attempts:
-            sleep(2 * attempt)
-            return search_book(title, year, attempt + 1, max_attempts)
+            sleep(2 * attempt)  # Exponentiell backoff
+            return search_book(title, attempt=attempt + 1, max_attempts=max_attempts)
         return None
 
 def main():
@@ -360,29 +350,25 @@ def main():
         output_df = pd.DataFrame(updated_books)
         output_df = output_df.drop_duplicates(subset=['Titel', 'Utgivningsår (API)'], keep='last')
         
-        # Spara resultatet
+        # Skapa separata filer för ej hittade böcker och böcker med avvikande år
+        not_found_df = output_df[output_df['Utgivningsår (API)'] == 'Ej hittad']
+        year_mismatch_df = output_df[output_df['Avvikande år'] == 'Ja']
+
+        # Spara alla resultat
         output_df.to_csv(output_file, sep=';', index=False, encoding='utf-8')
-        logging.info(f"Resultaten har sparats i {output_file}")
+        not_found_df.to_csv('ej_hittade_bocker.csv', sep=';', index=False, encoding='utf-8')
+        year_mismatch_df.to_csv('avvikande_ar_bocker.csv', sep=';', index=False, encoding='utf-8')
         
         # Skriv ut statistik
         total_processed = len(output_df)
         not_found = len(output_df[output_df['Utgivningsår (API)'] == 'Ej hittad'])
         year_mismatch = len(output_df[output_df['Avvikande år'] == 'Ja'])
         
-        # Skapa separata filer för ej hittade böcker och böcker med avvikande år
-        not_found_df = output_df[output_df['Utgivningsår (API)'] == 'Ej hittad']
-        year_mismatch_df = output_df[output_df['Avvikande år'] == 'Ja']
-
-        # Spara till separata filer
-        not_found_df.to_csv('ej_hittade_bocker.csv', sep=';', index=False, encoding='utf-8')
-        year_mismatch_df.to_csv('avvikande_ar_bocker.csv', sep=';', index=False, encoding='utf-8')
-
-        # Uppdatera loggningen för att inkludera information om de nya filerna
         logging.info(f"""
         Statistik:
         - Totalt antal böcker processerade: {total_processed}
-        - Antal böcker ej hittade: {not_found} (sparade i 'ej_hittade_bocker.csv')
-        - Antal böcker med avvikande år: {year_mismatch} (sparade i 'avvikande_ar_bocker.csv')
+        - Antal böcker ej hittade: {not_found}
+        - Antal böcker med avvikande år: {year_mismatch}
         """)
         
     except Exception as e:
